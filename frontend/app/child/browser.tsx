@@ -121,6 +121,10 @@ export default function ChildBrowser() {
         );
 
         if (response.data.blocked) {
+          // Immediately stop more content from loading
+          if (webViewRef.current) {
+            webViewRef.current.stopLoading();
+          }
           setBlocked(true);
           setBlockReason(response.data.reasons.join(', '));
         }
@@ -172,9 +176,10 @@ export default function ChildBrowser() {
           processedTexts.add(bodyText);
         }
 
-        // 2. Scan Images (Regular tags)
+        // 2. Scan Images (Regular tags) - Limit to first 15 to prevent CPU flood
         const images = document.getElementsByTagName('img');
-        for (let i = 0; i < images.length; i++) {
+        let processedCount = 0;
+        for (let i = 0; i < images.length && processedCount < 15; i++) {
           const src = images[i].src;
           if (src && !processedImages.has(src)) {
             // Process if it looks like an image or data URI
@@ -184,6 +189,7 @@ export default function ChildBrowser() {
                 content: src
               }));
               processedImages.add(src);
+              processedCount++;
             }
           }
         }

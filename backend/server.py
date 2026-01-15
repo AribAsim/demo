@@ -25,6 +25,13 @@ from bson import ObjectId
 from transformers import pipeline
 from PIL import Image
 import numpy as np
+import asyncio
+try:
+    import torch
+    HAS_CUDA = torch.cuda.is_available()
+except ImportError:
+    HAS_CUDA = False
+
 
 # Safe environment variable loader
 def _get_env(name: str, default: Optional[str] = None) -> str:
@@ -36,6 +43,19 @@ def _get_env(name: str, default: Optional[str] = None) -> str:
 # MongoDB connection with safe env loading
 mongo_url = _get_env('MONGO_URL', 'mongodb://localhost:27017')
 db_name = _get_env('DB_NAME', 'safebrowse_db')
+
+async def connect_to_mongo():
+    try:
+        temp_client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+        # Verify connection
+        await temp_client.admin.command('ping')
+        print(f"✅ Successfully connected to MongoDB at {mongo_url}")
+        return temp_client
+    except Exception as e:
+        print(f"❌ Failed to connect to MongoDB: {e}")
+        print("Running in limited mode (Database unavailable)")
+        return AsyncIOMotorClient(mongo_url) # Fallback
+
 client = AsyncIOMotorClient(mongo_url)
 db = client[db_name]
 
@@ -46,8 +66,30 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
+from contextlib import asynccontextmanager
+
+# ... (imports)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Connect to MongoDB
+    try:
+        # We can use the existing global 'client' or re-initialize it here
+        # For simplicity with existing code, we verify the connection
+        await client.admin.command('ping')
+        logger.info(f"✅ Successfully connected to MongoDB at {mongo_url}")
+    except Exception as e:
+        logger.warning(f"❌ Failed to connect to MongoDB: {e}")
+        logger.warning("Running in limited mode (Database unavailable)")
+    
+    yield
+    
+    # Shutdown: Close connection
+    client.close()
+    logger.info("MongoDB connection closed")
+
 # Create the main app
-app = FastAPI(title="SafeBrowse AI API")
+app = FastAPI(title="SafeBrowse AI API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
 # ==================== IMPROVED AI MODEL INITIALIZATION ====================
@@ -60,6 +102,10 @@ class NSFWDetector:
         self.image_models = []
         self.text_models = []
         
+        # Determine device: 0 for GPU (CUDA), -1 for CPU
+        self.device = 0 if HAS_CUDA else -1
+        logger.info(f"🚀 AI Inference running on: {'GPU (CUDA)' if HAS_CUDA else 'CPU'}")
+        
         # Load Image Models (multiple for voting system)
         try:
             logger.info("Loading Image AI Models...")
@@ -69,24 +115,24 @@ class NSFWDetector:
                 'model': pipeline(
                     "image-classification",
                     model="Falconsai/nsfw_image_detection",
-                    device=-1
+                    device=self.device
                 ),
                 'weight': 1.0
             })
             
-            # Model 2: AdamCodd (Higher accuracy)
+            # Model 2: AdamCodd (Higher accuracy) - GPU ACCELERATED
             try:
                 self.image_models.append({
                     'name': 'adamcodd',
                     'model': pipeline(
                         "image-classification",
                         model="AdamCodd/vit-base-nsfw-detector",
-                        device=-1
+                        device=self.device
                     ),
                     'weight': 1.5
                 })
             except Exception as e:
-                logger.warning(f"Could not load secondary image model (likely RAM limits): {e}")
+                logger.warning(f"Could not load secondary image model: {e}")
             
             logger.info(f"Loaded {len(self.image_models)} image models")
         except Exception as e:
@@ -101,7 +147,7 @@ class NSFWDetector:
                 'model': pipeline(
                     "text-classification",
                     model="martin-ha/toxic-comment-model",
-                    device=-1
+                    device=self.device
                 ),
                 'weight': 1.0
             })
@@ -113,7 +159,7 @@ class NSFWDetector:
                     'model': pipeline(
                         "text-classification",
                         model="unitary/unbiased-toxic-roberta",
-                        device=-1
+                        device=self.device
                     ),
                     'weight': 1.2
                 })
@@ -243,14 +289,27 @@ EXPLICIT_KEYWORDS = [
 ]
 
 VIOLENCE_KEYWORDS = [
-    r'\bkill\b', r'\bmurder\b', r'\bsuicide\b', r'\bdeath\b',
-    r'\bgore\b', r'\btorture\b', r'\bbomb\b', r'\bweapon\b',
-    r'\bgun\b', r'\bknife\b'
+    r'\bkill(?!er whale)\b', r'\bmurder\b', r'\bsuicide\b', 
+    r'\btorture\b', r'\bgore\b', r'\bmutilat',
+    r'\bterroris', r'\bbomb\b', r'\bexplosive',
+    r'\bshoot(?!ing star)\b', r'\bstab\b', r'\bstrangle\b',
 ]
 
 DRUG_KEYWORDS = [
-    r'\bcocaine\b', r'\bheroin\b', r'\bmeth\b', r'\bdrug deal',
-    r'\bget high\b'
+    r'\bcocaine\b', r'\bheroin\b', r'\bmeth\b', r'\bfentanyl\b',
+    r'\bdrug deal', r'\bget high\b', r'\bsnort\b',
+]
+
+GAMBLING_KEYWORDS = [
+    r'\bcasino\b', r'\bslot machine\b', r'\bpoker\b', r'\broulette\b',
+    r'\bbetting\b', r'\bjackpot\b', r'\bblackjack\b', r'\bonline bet',
+    r'\bgamble', r'\bgambling\b'
+]
+
+SELF_HARM_KEYWORDS = [
+    r'\bcut myself\b', r'\bcutting myself\b', r'\bkill myself\b',
+    r'\bwant to die\b', r'\banorexia\b', r'\bbulimia\b', r'\bpro-ana\b',
+    r'\bself-harm\b', r'\bhow to commit suicide\b'
 ]
 
 # Meta keywords that are often safe in search suggestions but unsafe on regular sites
@@ -260,18 +319,29 @@ META_KEYWORDS = ['adult content', 'adult site', 'adult movie', 'adult video', 'e
 EXPLICIT_RE = re.compile('|'.join(EXPLICIT_KEYWORDS), re.IGNORECASE)
 VIOLENCE_RE = re.compile('|'.join(VIOLENCE_KEYWORDS), re.IGNORECASE)
 DRUG_RE = re.compile('|'.join(DRUG_KEYWORDS), re.IGNORECASE)
+GAMBLING_RE = re.compile('|'.join(GAMBLING_KEYWORDS), re.IGNORECASE)
+SELF_HARM_RE = re.compile('|'.join(SELF_HARM_KEYWORDS), re.IGNORECASE)
 
-# Age-based thresholds
+# Trusted domains that manage their own content or are common utilities
+# We are more lenient with images/text from these domains
+TRUSTED_DOMAINS = [
+    'google.com', 'youtube.com', 'wikipedia.org', 'bing.com',
+    'khanacademy.org', 'coursera.org', 'edx.org', 'openai.com',
+    'microsoft.com', 'apple.com', 'github.com', 'stackoverflow.com',
+    'gmail.com', 'outlook.com', 'zoom.us', 'duolingo.com'
+]
+
+# Age-based thresholds (Adjusted to be less aggressive)
 AGE_THRESHOLDS = {
     'text': {
-        'strict': {'ai': 0.15, 'keyword': 1},      # Age 0-8
-        'moderate': {'ai': 0.40, 'keyword': 1},    # Age 9-12
-        'lenient': {'ai': 0.70, 'keyword': 2},     # Age 13+
+        'strict': {'ai': 0.35, 'keyword': 2},      # Age 0-8 (Increased AI threshold)
+        'moderate': {'ai': 0.55, 'keyword': 2},    # Age 9-12
+        'lenient': {'ai': 0.75, 'keyword': 3},     # Age 13+
     },
     'image': {
-        'strict': {'ai': 0.20, 'votes': 1},        
-        'moderate': {'ai': 0.50, 'votes': 1},      
-        'lenient': {'ai': 0.75, 'votes': 2},       
+        'strict': {'ai': 0.75, 'votes': 1},        # Greatly increased (NSFW models are noisy)
+        'moderate': {'ai': 0.85, 'votes': 1},      
+        'lenient': {'ai': 0.92, 'votes': 2},       
     }
 }
 
@@ -279,6 +349,11 @@ def get_age_category(age: int) -> str:
     if age <= 8: return 'strict'
     if age <= 12: return 'moderate'
     return 'lenient'
+
+def is_trusted_domain(url: str) -> bool:
+    if not url: return False
+    url_lower = url.lower()
+    return any(domain in url_lower for domain in TRUSTED_DOMAINS)
 
 def is_search_engine(url: str) -> bool:
     if not url: return False
@@ -301,39 +376,60 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
     explicit_matches = EXPLICIT_RE.findall(text)
     violence_matches = VIOLENCE_RE.findall(text)
     drug_matches = DRUG_RE.findall(text)
+    gambling_matches = GAMBLING_RE.findall(text)
+    self_harm_matches = SELF_HARM_RE.findall(text)
     
     # Context-aware filtering decision:
     on_search_engine = is_search_engine(url_context)
+    on_trusted_site = is_trusted_domain(url_context)
+    
     filtered_explicit = []
-    if on_search_engine:
+    if on_search_engine or on_trusted_site:
+        # Ignore common meta keywords and be more lenient on trusted sites
         for match in set(explicit_matches):
-            if match.lower() not in META_KEYWORDS:
+            match_lower = match.lower()
+            if match_lower not in META_KEYWORDS and len(match_lower) > 3:
                 filtered_explicit.append(match)
     else:
         filtered_explicit = explicit_matches
 
     if filtered_explicit:
         reasons.append(f"Explicit terms detected: {set(filtered_explicit)}")
-    if violence_matches:
+    if violence_matches and not on_trusted_site:
         reasons.append(f"Violence-related terms: {set(violence_matches)}")
-    if drug_matches:
+    if drug_matches and not on_trusted_site:
         reasons.append(f"Drug-related terms: {set(drug_matches)}")
+    if gambling_matches and not on_trusted_site:
+        reasons.append(f"Gambling-related terms: {set(gambling_matches)}")
+    if self_harm_matches:
+        reasons.append(f"Self-harm terms: {set(self_harm_matches)}")
 
     # 2. Layer: AI Ensemble
+    # Skip AI analysis for small snippets on trusted sites to avoid false positives
+    if on_trusted_site and len(text) < 100:
+        return True, 0.0, []
+
     ai_votes_toxic = 0.0
     ai_votes_safe = 0.0
     ai_scores = []
     
     for text_model in nsfw_detector.text_models:
         try:
-            res = text_model['model'](text[:500])[0]
+            # Use longer snippet for better context if available
+            res = text_model['model'](text[:800])[0]
             label = res['label'].lower()
             score = res['score']
             
             # Weighted Voting
-            if label in ['toxic', 'label_1', 'offensive'] or score > thresholds['ai']:
-                ai_votes_toxic += text_model['weight']
-                reasons.append(f"AI ({text_model['name']}): Toxic ({score:.2f})")
+            is_toxic_label = label in ['toxic', 'label_1', 'offensive', 'obscene']
+            
+            if is_toxic_label and score > thresholds['ai']:
+                # Even if AI thinks it's toxic, be more lenient on trusted sites
+                if on_trusted_site and score < thresholds['ai'] + 0.2:
+                    ai_votes_safe += text_model['weight']
+                else:
+                    ai_votes_toxic += text_model['weight']
+                    reasons.append(f"AI ({text_model['name']}): Toxic ({score:.2f})")
             else:
                 ai_votes_safe += text_model['weight']
             
@@ -346,21 +442,40 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
     # Decision Logic
     is_safe = True
     
-    # Hard block on hard keywords (if not on search engine bypass)
-    if len(filtered_explicit) >= thresholds['keyword']:
+    # Hard block on hard keywords
+    keyword_limit = thresholds['keyword']
+    
+    # Only allow leniency on trusted sites IF it is NOT a search engine results page
+    # We want to block 'porn' in Google Search, but maybe allow 'breast cancer' on Wikipedia
+    if on_trusted_site and not on_search_engine: 
+        keyword_limit += 2 
+    
+    if len(filtered_explicit) >= keyword_limit:
         is_safe = False
     
-    # Block on AI sentiment mismatch
-    if ai_votes_toxic > ai_votes_safe:
+    # Block on AI sentiment mismatch (only if we have significant confidence)
+    if ai_votes_toxic > ai_votes_safe and ai_votes_toxic >= 1.0:
         is_safe = False
         
-    # Block on violence/drugs for younger kids
-    if age <= 12 and (len(violence_matches) > 0 or len(drug_matches) > 0):
-        is_safe = False
+    # Block on violence/drugs/gambling for younger kids (unless on trusted site)
+    if not on_trusted_site:
+        if age <= 12:
+            # Zero tolerance for younger kids
+            if any([violence_matches, drug_matches, gambling_matches, self_harm_matches]):
+                is_safe = False
+        else:
+            # Older kids: Block explicit gambling/self-harm/drugs, allow mild violence context
+            if any([drug_matches, gambling_matches, self_harm_matches]):
+                is_safe = False
 
     return is_safe, avg_ai_confidence, reasons
 
-def analyze_image_content(content: str, age: int) -> Tuple[bool, float, List[str]]:
+# Simple in-memory cache for image URLs to avoid re-processing headers/logos
+# Format: {url: (is_safe, score, reasons)}
+IMAGE_CACHE = {}
+MAX_CACHE_SIZE = 1000
+
+def analyze_image_content(content: str, age: int, url_context: Optional[str] = None) -> Tuple[bool, float, List[str]]:
     """
     Image analysis with multi-model voting.
     Supports both base64 strings and image URLs.
@@ -368,15 +483,29 @@ def analyze_image_content(content: str, age: int) -> Tuple[bool, float, List[str
     if not nsfw_detector.image_models:
         return True, 0.0, ["Image AI not ready"]
 
+    # Check cache for URLs
+    if content.startswith(('http://', 'https://')):
+        if content in IMAGE_CACHE:
+            return IMAGE_CACHE[content]
+
+    on_trusted_site = is_trusted_domain(url_context)
+    
     try:
         img_data = None
         
         # Check if content is a URL
         if content.startswith(('http://', 'https://')):
             try:
-                response = requests.get(content, timeout=10)
+                # Add check for tiny images (likely icons/trackers)
+                if not content.endswith(('.jpg', '.jpeg', '.png', '.webp', '.avif')) and 'data:' not in content:
+                     # If it doesn't look like a real image URL, be lenient
+                     pass
+                
+                response = requests.get(content, timeout=5)
                 if response.status_code == 200:
-                    img_data = response.content
+                    content_type = response.headers.get('content-type', '')
+                    if 'image' in content_type or 'application/octet-stream' in content_type:
+                        img_data = response.content
             except Exception as e:
                 logger.warning(f"Failed to fetch image from URL {content}: {e}")
         
@@ -389,14 +518,36 @@ def analyze_image_content(content: str, age: int) -> Tuple[bool, float, List[str
             except:
                 return True, 0.0, ["Invalid image format"]
 
-        img = Image.open(io.BytesIO(img_data)).convert("RGB")
-        
-        # Resize for performance
-        img.thumbnail((400, 400))
+        if not img_data:
+            return True, 0.0, []
+
+        try:
+            # First try to open to verify it's a valid image
+            img = Image.open(io.BytesIO(img_data))
+            img.verify() 
+            
+            # Re-open for processing
+            img = Image.open(io.BytesIO(img_data)).convert("RGB")
+        except Exception:
+            return True, 0.0, []
+
+        # Check image dimensions - skip if too small (likely icons or trackers)
+        width, height = img.size
+        # Lower threshold slightly to catch small thumbnails
+        if width < 30 or height < 30:
+            return True, 0.0, []
+
+        # Resize for performance - Model expects 224x224 usually
+        img = img.resize((224, 224), Image.Resampling.NEAREST)
         
         age_cat = get_age_category(age)
         thresholds = AGE_THRESHOLDS['image'][age_cat]
         
+        # If on a trusted site, significantly raise the bar for blocking
+        current_ai_threshold = thresholds['ai']
+        if on_trusted_site:
+            current_ai_threshold = max(current_ai_threshold, 0.90)
+            
         nsfw_votes = 0.0
         safe_votes = 0.0
         scores = []
@@ -406,10 +557,11 @@ def analyze_image_content(content: str, age: int) -> Tuple[bool, float, List[str
             results = img_model['model'](img)
             nsfw_score = 0.0
             for res in results:
-                if any(k in res['label'].lower() for k in ['nsfw', 'porn', 'hentai', 'sexy', 'nudity', 'explicit', 'adult']):
+                label_lower = res['label'].lower()
+                if any(k in label_lower for k in ['nsfw', 'porn', 'hentai', 'sexy', 'nudity', 'explicit', 'adult']):
                     nsfw_score = max(nsfw_score, res['score'])
             
-            if nsfw_score > thresholds['ai']:
+            if nsfw_score > current_ai_threshold:
                 nsfw_votes += img_model['weight']
                 reasons.append(f"AI ({img_model['name']}): NSFW ({nsfw_score:.2f})")
             else:
@@ -418,8 +570,20 @@ def analyze_image_content(content: str, age: int) -> Tuple[bool, float, List[str
             scores.append(nsfw_score)
             
         avg_score = sum(scores) / len(scores) if scores else 0.0
-        is_safe = nsfw_votes < thresholds['votes']
         
+        # Require more than one vote for blocking on trusted sites or if leniency is high
+        votes_required = thresholds['votes']
+        if on_trusted_site: votes_required += 1
+
+        is_safe = nsfw_votes < votes_required
+        
+        # Cache safe results to prevent re-fetching (keep cache small)
+        if len(IMAGE_CACHE) > MAX_CACHE_SIZE:
+             IMAGE_CACHE.clear() # Primitive cleanup
+        
+        if content.startswith(('http://', 'https://')):
+            IMAGE_CACHE[content] = (is_safe, avg_score, reasons)
+            
         return is_safe, avg_score, reasons
     except Exception as e:
         logger.error(f"Image Analysis Error: {e}")
@@ -436,30 +600,65 @@ def analyze_url(url: str, age: int) -> Tuple[bool, float, List[str]]:
     # Known adult domains (Expanded)
     adult_domains = [
         'pornhub', 'xvideos', 'xnxx', 'redtube', 'youporn', 
-        'xhamster', 'hentai', 'onlyfans', 'chaturbate'
+        'xhamster', 'hentai', 'onlyfans', 'chaturbate', 'beeg', 'tnaflix'
     ]
+    # Known gambling domains
+    gambling_domains = [
+        'bet365', 'pokerstars', '888casino', 'draftkings', 'fanduel',
+        'roobet', 'stake.com', 'bovada'
+    ]
+    
     for domain in adult_domains:
         if domain in url_lower:
             reasons.append(f"Adult website: {domain}")
             score += 100
+            
+    for domain in gambling_domains:
+        if domain in url_lower:
+            reasons.append(f"Gambling website: {domain}")
+            score += 100
     
     # Keyword detection in URL (Using regex)
-    url_keywords = EXPLICIT_RE.findall(url_lower)
+    # If it's a trusted domain, we only care about the path, not the domain itself
+    target_text = url_lower
+    if is_trusted_domain(url_lower):
+        # Extract path for deeper check, but skip domain keywords like 'sex' in 'sex-education-wiki' maybe?
+        # For now, just be more lenient on trusted sites
+        target_text = url_lower.split('.com')[-1] if '.com' in url_lower else url_lower
+        
+    url_keywords = EXPLICIT_RE.findall(target_text)
     if url_keywords:
-        reasons.append(f"Explicit keywords in URL: {set(url_keywords)}")
-        score += 50
+        # Check against meta keywords that might appear innocently
+        filtered_keywords = [k for k in url_keywords if k.lower() not in META_KEYWORDS]
+        
+        # If we have explicit keywords that aren't meta-tags, block it.
+        # We process 'search engine' queries strictly for explicit terms.
+        if filtered_keywords:
+             reasons.append(f"Explicit keywords in URL: {set(filtered_keywords)}")
+             score += 50
     
     # Violence detection in URL
     val_keywords = VIOLENCE_RE.findall(url_lower)
-    if val_keywords and age <= 12:
+    if val_keywords and age <= 12 and not is_trusted_domain(url_lower):
         reasons.append(f"Restricted content in URL: {set(val_keywords)}")
         score += 40
+
+    # Gambling & Self-Harm in URL
+    if GAMBLING_RE.search(url_lower) and not is_trusted_domain(url_lower):
+         reasons.append("Gambling in URL")
+         score += 80
+    if DRUG_RE.search(url_lower) and not is_trusted_domain(url_lower):
+         reasons.append("Drug content in URL")
+         score += 80
+    if SELF_HARM_RE.search(url_lower) and not is_trusted_domain(url_lower):
+         reasons.append("Self-harm content in URL")
+         score += 100
 
     confidence = min(score / 100.0, 1.0)
     
     # Age-based threshold for URL risk
     age_cat = get_age_category(age)
-    limit = 30 if age_cat == 'strict' else (50 if age_cat == 'moderate' else 70)
+    limit = 35 if age_cat == 'strict' else (55 if age_cat == 'moderate' else 75)
     
     is_safe = score < limit
     
@@ -469,35 +668,42 @@ def analyze_url(url: str, age: int) -> Tuple[bool, float, List[str]]:
 
 @api_router.post("/auth/signup", response_model=Token)
 async def signup(user_data: UserCreate):
-    # Check if user exists
-    existing_user = await db.users.find_one({"email": user_data.email})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Create user
-    user_dict = {
-        "email": user_data.email,
-        "password": hash_password(user_data.password),
-        "name": user_data.name,
-        "pin": None,
-        "created_at": datetime.utcnow()
-    }
-    
-    result = await db.users.insert_one(user_dict)
-    user_id = str(result.inserted_id)
-    
-    # Create token
-    access_token = create_access_token(data={"sub": user_id})
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": {
-            "id": user_id,
+    try:
+        existing_user = await db.users.find_one({"email": user_data.email})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        hashed_password = hash_password(user_data.password)
+
+        user_dict = {
             "email": user_data.email,
-            "name": user_data.name
+            "password": hashed_password,
+            "name": user_data.name,
+            "pin": None,
+            "created_at": datetime.utcnow()
         }
-    }
+
+        result = await db.users.insert_one(user_dict)
+        user_id = str(result.inserted_id)
+
+        access_token = create_access_token({"sub": user_id})
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id,
+                "email": user_data.email,
+                "name": user_data.name
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Signup failed: {e}")
+        raise HTTPException(status_code=500, detail="Signup failed")
+
 
 @api_router.post("/auth/login", response_model=Token)
 async def login(credentials: UserLogin):
@@ -629,19 +835,25 @@ async def analyze_content(request: ContentAnalysisRequest):
         raise HTTPException(status_code=404, detail="Profile not found")
     
     age = profile["age"]
-    is_safe = True
-    confidence = 0.0
-    reasons = []
     
-    # Analyze based on content type
+    # Run heavy analysis in a separate thread to avoid blocking the async event loop
+    loop = asyncio.get_event_loop()
+    
     if request.content_type == "text":
-        is_safe, confidence, reasons = analyze_text_content(
-            request.content, age, request.context
+        is_safe, confidence, reasons = await loop.run_in_executor(
+            None, analyze_text_content, request.content, age, request.context
         )
     elif request.content_type == "url":
-        is_safe, confidence, reasons = analyze_url(request.content, age)
+        is_safe, confidence, reasons = await loop.run_in_executor(
+            None, analyze_url, request.content, age
+        )
     elif request.content_type == "image":
-        is_safe, confidence, reasons = analyze_image_content(request.content, age)
+        is_safe, confidence, reasons = await loop.run_in_executor(
+             None, analyze_image_content, request.content, age, request.context
+        )
+    else:
+        # Default fallback
+        is_safe, confidence, reasons = True, 0.0, []
     
     # Log the detection if harmful
     if not is_safe:
@@ -752,6 +964,3 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
