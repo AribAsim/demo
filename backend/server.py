@@ -1,11 +1,17 @@
+from pathlib import Path
+from dotenv import load_dotenv
+import os
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+# Ensure HF symlink warning is disabled even if not in .env
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os
 import logging
-from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -13,10 +19,12 @@ import jwt
 from passlib.context import CryptContext
 import re
 import base64
+import io
+import requests
 from bson import ObjectId
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+from transformers import pipeline
+from PIL import Image
+import numpy as np
 
 # Safe environment variable loader
 def _get_env(name: str, default: Optional[str] = None) -> str:
@@ -39,8 +47,85 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 # Create the main app
-app = FastAPI(title="SafeBrowse API")
+app = FastAPI(title="SafeBrowse AI API")
 api_router = APIRouter(prefix="/api")
+
+# ==================== IMPROVED AI MODEL INITIALIZATION ====================
+
+logger = logging.getLogger("SafeBrowseAI")
+
+# Multi-Model Approach for Better Accuracy
+class NSFWDetector:
+    def __init__(self):
+        self.image_models = []
+        self.text_models = []
+        
+        # Load Image Models (multiple for voting system)
+        try:
+            logger.info("Loading Image AI Models...")
+            # Model 1: Falconsai (Fast, good accuracy)
+            self.image_models.append({
+                'name': 'falconsai',
+                'model': pipeline(
+                    "image-classification",
+                    model="Falconsai/nsfw_image_detection",
+                    device=-1
+                ),
+                'weight': 1.0
+            })
+            
+            # Model 2: AdamCodd (Higher accuracy)
+            try:
+                self.image_models.append({
+                    'name': 'adamcodd',
+                    'model': pipeline(
+                        "image-classification",
+                        model="AdamCodd/vit-base-nsfw-detector",
+                        device=-1
+                    ),
+                    'weight': 1.5
+                })
+            except Exception as e:
+                logger.warning(f"Could not load secondary image model (likely RAM limits): {e}")
+            
+            logger.info(f"Loaded {len(self.image_models)} image models")
+        except Exception as e:
+            logger.error(f"Failed to load Image AI: {e}")
+        
+        # Load Text Models
+        try:
+            logger.info("Loading Text AI Models...")
+            # Primary Model: Toxic Comment (The one we know works well on limited RAM)
+            self.text_models.append({
+                'name': 'toxic-comment',
+                'model': pipeline(
+                    "text-classification",
+                    model="martin-ha/toxic-comment-model",
+                    device=-1
+                ),
+                'weight': 1.0
+            })
+            
+            # Secondary Model (Optional if RAM allows)
+            try:
+                self.text_models.append({
+                    'name': 'unbiased-roberta',
+                    'model': pipeline(
+                        "text-classification",
+                        model="unitary/unbiased-toxic-roberta",
+                        device=-1
+                    ),
+                    'weight': 1.2
+                })
+            except Exception as e:
+                logger.warning(f"Could not load secondary text model: {e}")
+                
+            logger.info(f"Loaded {len(self.text_models)} text models")
+        except Exception as e:
+            logger.error(f"Failed to load Text AI: {e}")
+
+# Initialize the global detector instance
+nsfw_detector = NSFWDetector()
 
 # ==================== MODELS ====================
 
@@ -145,98 +230,238 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-# ==================== CONTENT FILTERING ====================
+# ==================== IMPROVED CONTENT FILTERING ====================
 
-# Explicit content keywords and patterns
+# Enhanced keyword lists with regex patterns
 EXPLICIT_KEYWORDS = [
-    'porn', 'xxx', 'sex', 'nude', 'naked', 'explicit', 'adult',
-    'nsfw', 'hentai', 'fuck', 'shit', 'bitch', 'ass', 'dick',
-    'pussy', 'cock', 'cum', 'masturbate', 'orgasm', 'rape'
-]
-
-SLANG_TERMS = [
-    'netflix and chill', 'hook up', 'fwb', 'dtf', 'smash',
-    'thot', 'simp', 'daddy', 'kinky', 'naughty'
-]
-
-EMOJI_PATTERNS = [
-    '🍆', '🍑', '💦', '🔥', '👅', '🌶️', '🔞'
+    r'\bporn', r'\bxxx\b', r'\bsex\b', r'\bnude\b', r'\bnaked\b', 
+    r'\bnsfw\b', r'\bhentai\b', r'\berotic\b', 
+    r'\bfuck', r'\bshit\b', r'\bbitch\b', r'\bdick\b',
+    r'\bpussy\b', r'\bcock\b', r'\bcum\b', 
+    r'\bmasturbat', r'\borgy\b', r'\brape\b',
+    r'adult content', r'adult site', r'adult movie', r'adult video'
 ]
 
 VIOLENCE_KEYWORDS = [
-    'kill', 'murder', 'suicide', 'death', 'blood', 'gore',
-    'torture', 'weapon', 'gun', 'knife', 'bomb'
+    r'\bkill\b', r'\bmurder\b', r'\bsuicide\b', r'\bdeath\b',
+    r'\bgore\b', r'\btorture\b', r'\bbomb\b', r'\bweapon\b',
+    r'\bgun\b', r'\bknife\b'
 ]
 
-def analyze_text_content(text: str, age: int) -> Tuple[bool, float, List[str]]:
-    """
-    Analyze text for harmful content
-    Returns: (is_safe, confidence, reasons)
-    """
-    text_lower = text.lower()
-    reasons = []
-    score = 0
-    
-    # Check explicit keywords
-    for keyword in EXPLICIT_KEYWORDS:
-        if keyword in text_lower:
-            reasons.append(f"Explicit content: '{keyword}'")
-            score += 20
-    
-    # Check slang terms
-    for slang in SLANG_TERMS:
-        if slang in text_lower:
-            reasons.append(f"Inappropriate slang: '{slang}'")
-            score += 10
-    
-    # Check emoji patterns
-    for emoji in EMOJI_PATTERNS:
-        if emoji in text:
-            reasons.append(f"Suggestive emoji: '{emoji}'")
-            score += 15
-    
-    # Check violence
-    for keyword in VIOLENCE_KEYWORDS:
-        if keyword in text_lower:
-            reasons.append(f"Violence-related: '{keyword}'")
-            score += 15
-    
-    # Age-based thresholds
-    if age <= 8:
-        threshold = 20  # Very strict
-    elif age <= 12:
-        threshold = 35  # Moderate
-    else:
-        threshold = 50  # Lenient
-    
-    confidence = min(score / 100.0, 1.0)
-    is_safe = score < threshold
-    
-    return is_safe, confidence, reasons
+DRUG_KEYWORDS = [
+    r'\bcocaine\b', r'\bheroin\b', r'\bmeth\b', r'\bdrug deal',
+    r'\bget high\b'
+]
 
-def analyze_url(url: str) -> Tuple[bool, float, List[str]]:
+# Meta keywords that are often safe in search suggestions but unsafe on regular sites
+META_KEYWORDS = ['adult content', 'adult site', 'adult movie', 'adult video', 'explicit content']
+
+# Compile patterns for efficiency
+EXPLICIT_RE = re.compile('|'.join(EXPLICIT_KEYWORDS), re.IGNORECASE)
+VIOLENCE_RE = re.compile('|'.join(VIOLENCE_KEYWORDS), re.IGNORECASE)
+DRUG_RE = re.compile('|'.join(DRUG_KEYWORDS), re.IGNORECASE)
+
+# Age-based thresholds
+AGE_THRESHOLDS = {
+    'text': {
+        'strict': {'ai': 0.15, 'keyword': 1},      # Age 0-8
+        'moderate': {'ai': 0.40, 'keyword': 1},    # Age 9-12
+        'lenient': {'ai': 0.70, 'keyword': 2},     # Age 13+
+    },
+    'image': {
+        'strict': {'ai': 0.20, 'votes': 1},        
+        'moderate': {'ai': 0.50, 'votes': 1},      
+        'lenient': {'ai': 0.75, 'votes': 2},       
+    }
+}
+
+def get_age_category(age: int) -> str:
+    if age <= 8: return 'strict'
+    if age <= 12: return 'moderate'
+    return 'lenient'
+
+def is_search_engine(url: str) -> bool:
+    if not url: return False
+    url_lower = url.lower()
+    search_engines = ['google.com', 'bing.com', 'duckduckgo.com', 'yahoo.com', 'baidu.com', 'chrome://newtab']
+    return any(se in url_lower for se in search_engines)
+
+def analyze_text_content(text: str, age: int, url_context: Optional[str] = None) -> Tuple[bool, float, List[str]]:
     """
-    Analyze URL for harmful patterns
+    Multi-model text analysis with ensemble voting and context awareness
+    """
+    if not text or not text.strip():
+        return True, 0.0, []
+
+    age_cat = get_age_category(age)
+    thresholds = AGE_THRESHOLDS['text'][age_cat]
+    reasons = []
+    
+    # 1. Layer: Keyword Match
+    explicit_matches = EXPLICIT_RE.findall(text)
+    violence_matches = VIOLENCE_RE.findall(text)
+    drug_matches = DRUG_RE.findall(text)
+    
+    # Context-aware filtering decision:
+    on_search_engine = is_search_engine(url_context)
+    filtered_explicit = []
+    if on_search_engine:
+        for match in set(explicit_matches):
+            if match.lower() not in META_KEYWORDS:
+                filtered_explicit.append(match)
+    else:
+        filtered_explicit = explicit_matches
+
+    if filtered_explicit:
+        reasons.append(f"Explicit terms detected: {set(filtered_explicit)}")
+    if violence_matches:
+        reasons.append(f"Violence-related terms: {set(violence_matches)}")
+    if drug_matches:
+        reasons.append(f"Drug-related terms: {set(drug_matches)}")
+
+    # 2. Layer: AI Ensemble
+    ai_votes_toxic = 0.0
+    ai_votes_safe = 0.0
+    ai_scores = []
+    
+    for text_model in nsfw_detector.text_models:
+        try:
+            res = text_model['model'](text[:500])[0]
+            label = res['label'].lower()
+            score = res['score']
+            
+            # Weighted Voting
+            if label in ['toxic', 'label_1', 'offensive'] or score > thresholds['ai']:
+                ai_votes_toxic += text_model['weight']
+                reasons.append(f"AI ({text_model['name']}): Toxic ({score:.2f})")
+            else:
+                ai_votes_safe += text_model['weight']
+            
+            ai_scores.append(score)
+        except:
+            continue
+    
+    avg_ai_confidence = sum(ai_scores) / len(ai_scores) if ai_scores else 0.0
+    
+    # Decision Logic
+    is_safe = True
+    
+    # Hard block on hard keywords (if not on search engine bypass)
+    if len(filtered_explicit) >= thresholds['keyword']:
+        is_safe = False
+    
+    # Block on AI sentiment mismatch
+    if ai_votes_toxic > ai_votes_safe:
+        is_safe = False
+        
+    # Block on violence/drugs for younger kids
+    if age <= 12 and (len(violence_matches) > 0 or len(drug_matches) > 0):
+        is_safe = False
+
+    return is_safe, avg_ai_confidence, reasons
+
+def analyze_image_content(content: str, age: int) -> Tuple[bool, float, List[str]]:
+    """
+    Image analysis with multi-model voting.
+    Supports both base64 strings and image URLs.
+    """
+    if not nsfw_detector.image_models:
+        return True, 0.0, ["Image AI not ready"]
+
+    try:
+        img_data = None
+        
+        # Check if content is a URL
+        if content.startswith(('http://', 'https://')):
+            try:
+                response = requests.get(content, timeout=10)
+                if response.status_code == 200:
+                    img_data = response.content
+            except Exception as e:
+                logger.warning(f"Failed to fetch image from URL {content}: {e}")
+        
+        # If not a URL or URL fetch failed, try base64
+        if img_data is None:
+            if "base64," in content:
+                content = content.split("base64,")[1]
+            try:
+                img_data = base64.b64decode(content)
+            except:
+                return True, 0.0, ["Invalid image format"]
+
+        img = Image.open(io.BytesIO(img_data)).convert("RGB")
+        
+        # Resize for performance
+        img.thumbnail((400, 400))
+        
+        age_cat = get_age_category(age)
+        thresholds = AGE_THRESHOLDS['image'][age_cat]
+        
+        nsfw_votes = 0.0
+        safe_votes = 0.0
+        scores = []
+        reasons = []
+        
+        for img_model in nsfw_detector.image_models:
+            results = img_model['model'](img)
+            nsfw_score = 0.0
+            for res in results:
+                if any(k in res['label'].lower() for k in ['nsfw', 'porn', 'hentai', 'sexy', 'nudity', 'explicit', 'adult']):
+                    nsfw_score = max(nsfw_score, res['score'])
+            
+            if nsfw_score > thresholds['ai']:
+                nsfw_votes += img_model['weight']
+                reasons.append(f"AI ({img_model['name']}): NSFW ({nsfw_score:.2f})")
+            else:
+                safe_votes += img_model['weight']
+            
+            scores.append(nsfw_score)
+            
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+        is_safe = nsfw_votes < thresholds['votes']
+        
+        return is_safe, avg_score, reasons
+    except Exception as e:
+        logger.error(f"Image Analysis Error: {e}")
+        return True, 0.0, [str(e)]
+
+def analyze_url(url: str, age: int) -> Tuple[bool, float, List[str]]:
+    """
+    URL analysis with domain-level blocking and age thresholds
     """
     url_lower = url.lower()
     reasons = []
     score = 0
     
-    # Known adult domains
-    adult_domains = ['pornhub', 'xvideos', 'xnxx', 'redtube', 'youporn']
+    # Known adult domains (Expanded)
+    adult_domains = [
+        'pornhub', 'xvideos', 'xnxx', 'redtube', 'youporn', 
+        'xhamster', 'hentai', 'onlyfans', 'chaturbate'
+    ]
     for domain in adult_domains:
         if domain in url_lower:
             reasons.append(f"Adult website: {domain}")
             score += 100
     
-    # Check for adult keywords in URL
-    for keyword in EXPLICIT_KEYWORDS:
-        if keyword in url_lower:
-            reasons.append(f"Explicit keyword in URL: '{keyword}'")
-            score += 30
+    # Keyword detection in URL (Using regex)
+    url_keywords = EXPLICIT_RE.findall(url_lower)
+    if url_keywords:
+        reasons.append(f"Explicit keywords in URL: {set(url_keywords)}")
+        score += 50
     
+    # Violence detection in URL
+    val_keywords = VIOLENCE_RE.findall(url_lower)
+    if val_keywords and age <= 12:
+        reasons.append(f"Restricted content in URL: {set(val_keywords)}")
+        score += 40
+
     confidence = min(score / 100.0, 1.0)
-    is_safe = score < 30
+    
+    # Age-based threshold for URL risk
+    age_cat = get_age_category(age)
+    limit = 30 if age_cat == 'strict' else (50 if age_cat == 'moderate' else 70)
+    
+    is_safe = score < limit
     
     return is_safe, confidence, reasons
 
@@ -410,14 +635,13 @@ async def analyze_content(request: ContentAnalysisRequest):
     
     # Analyze based on content type
     if request.content_type == "text":
-        is_safe, confidence, reasons = analyze_text_content(request.content, age)
+        is_safe, confidence, reasons = analyze_text_content(
+            request.content, age, request.context
+        )
     elif request.content_type == "url":
-        is_safe, confidence, reasons = analyze_url(request.content)
+        is_safe, confidence, reasons = analyze_url(request.content, age)
     elif request.content_type == "image":
-        # For MVP, basic image analysis (would be enhanced with ML model)
-        reasons.append("Image analysis not yet implemented - marked as safe")
-        is_safe = True
-        confidence = 0.5
+        is_safe, confidence, reasons = analyze_image_content(request.content, age)
     
     # Log the detection if harmful
     if not is_safe:

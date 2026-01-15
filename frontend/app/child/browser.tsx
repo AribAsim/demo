@@ -68,7 +68,7 @@ export default function ChildBrowser() {
 
   const handleNavigate = async () => {
     let targetUrl = url.trim();
-    
+
     if (!targetUrl) {
       return;
     }
@@ -92,7 +92,7 @@ export default function ChildBrowser() {
   const handleWebViewNavigationStateChange = async (navState: any) => {
     setCanGoBack(navState.canGoBack);
     setCanGoForward(navState.canGoForward);
-    
+
     if (navState.url !== currentUrl) {
       const isSafe = await analyzeUrl(navState.url);
       if (!isSafe) {
@@ -105,13 +105,13 @@ export default function ChildBrowser() {
   const handleWebViewMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      
-      if (data.type === 'text') {
+
+      if (data.type === 'text' || data.type === 'image') {
         const response = await axios.post(
           `${API_URL}/api/content/analyze`,
           {
             profile_id: selectedProfile,
-            content_type: 'text',
+            content_type: data.type,
             content: data.content,
             context: currentUrl,
           },
@@ -158,28 +158,84 @@ export default function ChildBrowser() {
   // Inject script to intercept content
   const injectedJavaScript = `
     (function() {
-      // Monitor text content
+      const processedImages = new Set();
+      const processedTexts = new Set();
+
+      function scanContent() {
+        // 1. Scan Text (Titles, Headers, Body)
+        const bodyText = document.body.innerText.substring(0, 1000);
+        if (bodyText && !processedTexts.has(bodyText)) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'text',
+            content: bodyText
+          }));
+          processedTexts.add(bodyText);
+        }
+
+        // 2. Scan Images (Regular tags)
+        const images = document.getElementsByTagName('img');
+        for (let i = 0; i < images.length; i++) {
+          const src = images[i].src;
+          if (src && !processedImages.has(src)) {
+            // Process if it looks like an image or data URI
+            if (src.startsWith('data:') || src.includes('image') || src.match(/\\.(jpg|jpeg|png|webp|gif|avif)/i)) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'image',
+                content: src
+              }));
+              processedImages.add(src);
+            }
+          }
+        }
+
+        // 3. Scan for CSS Background Images (Common in modern sites)
+        const elementsWithBg = document.querySelectorAll('[style*="background-image"]');
+        elementsWithBg.forEach(el => {
+          const style = window.getComputedStyle(el);
+          const bg = style.backgroundImage;
+          if (bg && bg !== 'none' && bg.startsWith('url(')) {
+            const url = bg.slice(4, -1).replace(/["']/g, "");
+            if (url && !processedImages.has(url)) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'image',
+                content: url
+              }));
+              processedImages.add(url);
+            }
+          }
+        });
+
+        // 4. Scan for Videos (Metadata)
+        const videos = document.getElementsByTagName('video');
+        if (videos.length > 0 && !processedTexts.has('video_detected')) {
+          const videoTags = Array.from(document.querySelectorAll('meta[name*="title"], meta[property*="title"]'))
+            .map(m => m.content).join(' ');
+          if (videoTags) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'text',
+              content: "Video content title: " + videoTags
+            }));
+          }
+          processedTexts.add('video_detected');
+        }
+      }
+
+      // Monitor for changes
       const observer = new MutationObserver(() => {
-        const bodyText = document.body.innerText.substring(0, 500);
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'text',
-          content: bodyText
-        }));
+        scanContent();
       });
       
       observer.observe(document.body, {
         childList: true,
-        subtree: true
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src']
       });
 
       // Initial check
-      setTimeout(() => {
-        const bodyText = document.body.innerText.substring(0, 500);
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'text',
-          content: bodyText
-        }));
-      }, 1000);
+      setTimeout(scanContent, 1000);
+      // Periodical check for dynamic content not caught by observer
+      setInterval(scanContent, 3000);
     })();
     true;
   `;
