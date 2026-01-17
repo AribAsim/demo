@@ -406,8 +406,8 @@ SOCIAL_MEDIA_DOMAINS = [
 # Age-based thresholds (Adjusted to be less aggressive)
 AGE_THRESHOLDS = {
     'text': {
-        'strict': {'ai': 0.35, 'keyword': 2},      # Age 0-8 (Increased AI threshold)
-        'moderate': {'ai': 0.55, 'keyword': 2},    # Age 9-12
+        'strict': {'ai': 0.35, 'keyword': 1},      # Age 0-8 (Increased AI threshold)
+        'moderate': {'ai': 0.55, 'keyword': 1},    # Age 9-12
         'lenient': {'ai': 0.75, 'keyword': 3},     # Age 13+
     },
     'image': {
@@ -525,7 +525,9 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
         arousing_count = sum(1 for w in AROUSING_KEYWORDS if w in text_lower)
         
         # Heuristic: If we have redeeming words and NO arousing words, we might allow simple explicit terms
-        is_educational_context = redeeming_count >= 2 and arousing_count == 0
+        # If term is just 'sex', 1 redeeming word is enough (e.g. 'sex education')
+        min_redeeming = 1 if all(m.lower() == 'sex' for m in explicit_matches) else 2
+        is_educational_context = redeeming_count >= min_redeeming and arousing_count == 0
         
         if on_trusted_site or is_educational_context:
             # Be very lenient. Only block if we see hardcore terms (which shouldn't be in edu context)
@@ -564,7 +566,7 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
     # If text matches ambiguous words (like 'hot') but NO explicit phrases (like 'hot girl'),
     # we treat it as a safe context (e.g. 'hot weather').
     ambiguous_matches = AMBIGUOUS_RE.findall(text)
-    is_ambiguous_only = bool(ambiguous_matches) and not filtered_explicit
+    is_ambiguous_only = bool(ambiguous_matches) and not final_explicit_matches
     
     ai_votes_toxic = 0.0
     ai_votes_safe = 0.0
@@ -597,7 +599,7 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
             else:
                 ai_votes_safe += text_model['weight']
             
-            ai_scores.append(score)
+            scores.append(score)
         except:
             continue
     
@@ -615,7 +617,7 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
 
     # Filter out very short matches that might be noise (e.g., 'ho' vs 'hoe')
     # Since we now use \b, this is less risky, but still good hygiene for search queries
-    strong_explicit_matches = [m for m in filtered_explicit if len(m) > 2]
+    strong_explicit_matches = [m for m in final_explicit_matches if len(m) > 2]
     
     if len(strong_explicit_matches) >= keyword_thresh:
         is_safe = False
@@ -885,7 +887,7 @@ def analyze_url(url: str, age: int, blocked_sites: List[str] = None, whitelisted
                  
         if should_block:
              reasons.append(f"Explicit keywords in URL: {set(filtered_keywords)}")
-             score += 50
+             score += 100
     
     # Violence/Crime detection in URL
     # Use target_text (query or path) instead of full url_lower to avoid matching domain names/params incorrectly

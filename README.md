@@ -26,6 +26,11 @@ SafeBrowse is a next-generation parental control application designed to provide
   - 🔪 Self-Harm & Suicide
   - 🤬 Hate Speech & Toxic Language
   - 🚫 Age-Restricted Social Media (Users < 16 blocked from FB, Insta, TikTok, etc.)
+- **Search Engine Safety**: Intelligent parsing for Google and DuckDuckGo ensures that:
+  - Educational searches (e.g., "human anatomy") are valid.
+  - Excessive autocomplete suggestions don't trigger blocks.
+  - Explicit search queries are blocked *before* results load.
+- **Fail-Safe Architecture**: Designed to default to safety without crashing the app, even under heavy load or network timeouts.
 
 ### 👨‍👩‍👧‍👦 Parent Dashboard
 - **Digital Wellbeing Dashboard**: View estimated screen time and safety charts with an interactive profile selector. Auto-refreshes every 30s for near real-time monitoring (Last 7 Days).
@@ -144,9 +149,23 @@ Safe-Browse/
 
 5. Start the Server:
    ```bash
-   uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+   uvicorn server:app --host 0.0.0.0 --port 8000 --reload
    ```
    You should see logs indicating that AI models are loading (this may take a minute on first run).
+
+### 3. Testing & Validation
+
+To verify the system's stability and detection logic, run the included stress test suite:
+
+```bash
+cd backend
+python stress_test_suite.py
+```
+This will execute a comprehensive set of tests covering:
+- Backend Robustness & Crash Safety
+- AI False Positive/Negative Verification
+- Regex & Search Engine Logic (Google/DuckDuckGo)
+- Digital Wellbeing Logging
 
 ### 2. Frontend Setup
 
