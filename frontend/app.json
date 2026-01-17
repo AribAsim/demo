@@ -3,7 +3,7 @@
     "name": "frontend",
     "slug": "frontend",
     "extra": {
-      "EXPO_PUBLIC_BACKEND_URL": "http://10.54.104.144:8000"
+      "EXPO_PUBLIC_BACKEND_URL": "http://10.176.127.11:8000"
     },
     "version": "1.0.0",
     "orientation": "portrait",

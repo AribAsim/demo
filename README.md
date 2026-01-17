@@ -14,6 +14,7 @@ SafeBrowse is a next-generation parental control application designed to provide
 - **Real-Time Image Filtering**: Analyzes images on the fly using GPU acceleration (if available) to block NSFW, gore, and violent imagery.
 - **Context-Aware Text Analysis**: Detects bullying, hate speech, sexual content, and self-harm triggers in text.
 - **Expanded Safety Categories**: Blocks not just adult content, but also:
+  - 🔞 Adult Content (Smart pattern matching minimizes false positives)
   - 🩸 Gore & Violence
   - 💊 Drugs & Substance Abuse
   - 🎲 Gambling
@@ -35,6 +36,18 @@ SafeBrowse is a next-generation parental control application designed to provide
 - **Seamless Experience**: Fast browsing with minimal latency thanks to optimized local inference.
 
 ---
+## Process Flow Diagram
+User initiates a web request
+• SafeBrowse intercepts the request at browser level
+• Content is analyzed using NLP and image classification
+models.
+• Risk score is generated.
+• Content is either allowed, blurred or blocked
+• Event is logged for parental insight
+
+---
+
+---
 
 ## 🛠️ Tech Stack
 
@@ -43,7 +56,7 @@ SafeBrowse is a next-generation parental control application designed to provide
 - **Database**: [MongoDB](https://www.mongodb.com/) (Async Motor Driver)
 - **AI/ML**: 
   - [PyTorch](https://pytorch.org/) & [Hugging Face Transformers](https://huggingface.co/)
-  - Models: `Falconsai/nsfw_image_detection`, `AdamCodd/vit-base-nsfw-detector`, `martin-ha/toxic-comment-model`
+  - Models: `Falconsai/nsfw_image_detection-0.980375`, `AdamCodd/vit-base-nsfw-detector-0.9654`, `martin-ha/toxic-comment-model-94% accuracy and 0.59 f1-score in a 10000 rows held-out test set`
   - **GPU Support**: Automatic CUDA detection for high-performance inference.
 - **Authentication**: JWT (JSON Web Tokens) with Bcrypt hashing.
 
@@ -55,7 +68,15 @@ SafeBrowse is a next-generation parental control application designed to provide
 - **Browser Engine**: `react-native-webview` with injected JavaScript for content extraction.
 
 ---
+---
+## Architecture Diagram
+•Browser Extension Layer
+• AI Processing Engine
+• Content Classification Models
+• Decision Engine (Allow / Block / Blur)
+• Logging Module
 
+---
 ## 📂 Project Structure
 
 ```bash
@@ -141,7 +162,6 @@ Safe-Browse/
 
 4. **Run on Device**: Scan the QR code displayed in the terminal using the **Expo Go** app on your phone. Ensure your phone and computer are on the **same Wi-Fi network**.
 
----
 
 ## 📖 Usage Guide
 

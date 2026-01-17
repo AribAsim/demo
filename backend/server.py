@@ -312,7 +312,11 @@ EXPLICIT_KEYWORDS = [
     r'\bfuck', r'\bshit\b', r'\bbitch\b', r'\bdick\b',
     r'\bpussy\b', r'\bcock\b', r'\bcum\b', 
     r'\bmasturbat', r'\borgy\b', r'\brape\b',
-    r'adult content', r'adult site', r'adult movie', r'adult video'
+    r'adult content', r'adult site', r'adult movie', r'adult video',
+    # Contextual Explicit Phrases (to avoid blocking single words like 'hot')
+    'hot girl', 'hot girls', 'hot babe', 'hot babes', 'hot sex', 'hot women', 
+    'hot milf', 'hot teen', 'hot teens', 'hot wife', 'hot wives', 'hot mom', 'hot moms',
+    'strip club', 'strip tease', 'hard core', 'hardcore'
 ]
 
 VIOLENCE_KEYWORDS = [
@@ -364,13 +368,28 @@ CRIME_KEYWORDS = [
 # Meta keywords that are often safe in search suggestions but unsafe on regular sites
 META_KEYWORDS = []
 
-# Compile patterns for efficiency
-EXPLICIT_RE = re.compile('|'.join(EXPLICIT_KEYWORDS), re.IGNORECASE)
-VIOLENCE_RE = re.compile('|'.join(VIOLENCE_KEYWORDS), re.IGNORECASE)
-DRUG_RE = re.compile('|'.join(DRUG_KEYWORDS), re.IGNORECASE)
-GAMBLING_RE = re.compile('|'.join(GAMBLING_KEYWORDS), re.IGNORECASE)
-SELF_HARM_RE = re.compile('|'.join(SELF_HARM_KEYWORDS), re.IGNORECASE)
-CRIME_RE = re.compile('|'.join(CRIME_KEYWORDS), re.IGNORECASE)
+# Helper to compile safe patterns with boundaries
+def compile_safe_pattern(keywords):
+    # Escape keywords just in case, and ensure word boundaries
+    # We strip existing \b to avoid double application, then re-apply
+    cleaned = [k.replace(r'\b', '') for k in keywords]
+    pattern = r'\b(' + '|'.join(map(re.escape, cleaned)) + r')\b'
+    return re.compile(pattern, re.IGNORECASE)
+
+# Compile patterns for efficiency with strict boundaries
+EXPLICIT_RE = compile_safe_pattern(EXPLICIT_KEYWORDS)
+VIOLENCE_RE = compile_safe_pattern(VIOLENCE_KEYWORDS)
+DRUG_RE = compile_safe_pattern(DRUG_KEYWORDS)
+GAMBLING_RE = compile_safe_pattern(GAMBLING_KEYWORDS)
+SELF_HARM_RE = compile_safe_pattern(SELF_HARM_KEYWORDS)
+CRIME_RE = compile_safe_pattern(CRIME_KEYWORDS)
+
+# Ambiguous/Double-meaning words that are safe on their own
+# We use these to dampen AI sensitivity when they appear without explicit context
+AMBIGUOUS_KEYWORDS = [
+    'hot', 'strip', 'hard', 'wet', 'dirty', 'bang', 'beaver', 'facial'
+]
+AMBIGUOUS_RE = compile_safe_pattern(AMBIGUOUS_KEYWORDS)
 
 # Trusted domains that manage their own content or are common utilities
 # We are more lenient with images/text from these domains
@@ -437,8 +456,17 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
     on_search_engine = is_search_engine(url_context)
     on_trusted_site = is_trusted_domain(url_context)
     
+
     filtered_explicit = []
-    if on_search_engine or on_trusted_site:
+    if on_search_engine:
+        # On search engines, we rely on the URL/Query analysis (analyze_url) to block explicit searches.
+        # We generally IGNORE page text here because it often contains:
+        # 1. Auto-suggestions (which might be explicit even if the user didn't search for them)
+        # 2. Irrelevant text snippets
+        # Blocking based on suggestions prevents the user from even searching safely.
+        return True, 0.0, []
+
+    if on_trusted_site:
         # Ignore common meta keywords and be more lenient on trusted sites
         for match in set(explicit_matches):
             match_lower = match.lower()
@@ -465,6 +493,12 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
     if on_trusted_site and len(text) < 100:
         return True, 0.0, []
 
+    # Check for ambiguous words (Double meaning protection)
+    # If text matches ambiguous words (like 'hot') but NO explicit phrases (like 'hot girl'),
+    # we treat it as a safe context (e.g. 'hot weather').
+    ambiguous_matches = AMBIGUOUS_RE.findall(text)
+    is_ambiguous_only = bool(ambiguous_matches) and not filtered_explicit
+    
     ai_votes_toxic = 0.0
     ai_votes_safe = 0.0
     ai_scores = []
@@ -479,9 +513,16 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
             # Weighted Voting
             is_toxic_label = label in ['toxic', 'label_1', 'offensive', 'obscene']
             
-            if is_toxic_label and score > thresholds['ai']:
+            # Dynamic threshold adjustment for double-meaning words
+            detected_threshold = thresholds['ai']
+            if is_ambiguous_only:
+                # If text contains ambiguous words (like 'hot') but no explicit keywords,
+                # we significantly raise the threshold to avoid false positives.
+                detected_threshold += 0.35
+            
+            if is_toxic_label and score > detected_threshold:
                 # Even if AI thinks it's toxic, be more lenient on trusted sites
-                if on_trusted_site and score < thresholds['ai'] + 0.2:
+                if on_trusted_site and score < detected_threshold + 0.2:
                     ai_votes_safe += text_model['weight']
                 else:
                     ai_votes_toxic += text_model['weight']
@@ -498,31 +539,40 @@ def analyze_text_content(text: str, age: int, url_context: Optional[str] = None)
     # Decision Logic
     is_safe = True
     
-    # Hard block on hard keywords
-    keyword_limit = thresholds['keyword']
+    # Keyword Threshold Logic
+    # On Trusted Sites/Search Engines: High threshold (require user to be very explicit)
+    if on_trusted_site or on_search_engine:
+         keyword_thresh = 3 # Need at least 3 distinct explicit words to block purely on text
+    else:
+         keyword_thresh = thresholds['keyword']
+
+    # Filter out very short matches that might be noise (e.g., 'ho' vs 'hoe')
+    # Since we now use \b, this is less risky, but still good hygiene for search queries
+    strong_explicit_matches = [m for m in filtered_explicit if len(m) > 2]
     
-    # Only allow leniency on trusted sites IF it is NOT a search engine results page
-    # We want to block 'porn' in Google Search, but maybe allow 'breast cancer' on Wikipedia
-    if on_trusted_site and not on_search_engine: 
-        keyword_limit += 2 
-    
-    if len(filtered_explicit) >= keyword_limit:
+    if len(strong_explicit_matches) >= keyword_thresh:
         is_safe = False
+        reasons.append("Flagged due to repeated explicit keyword patterns")
     
     # Block on AI sentiment mismatch (only if we have significant confidence)
     if ai_votes_toxic > ai_votes_safe and ai_votes_toxic >= 1.0:
         is_safe = False
         
     # Block on violence/drugs/gambling for younger kids (unless on trusted site)
-    # Block on violence/drugs/gambling for younger kids (unless on trusted site)
     if not on_trusted_site:
         if age <= 12:
-            # Zero tolerance for younger kids
-            if any([violence_matches, drug_matches, gambling_matches, self_harm_matches, crime_matches]):
-                is_safe = False
+            # Zero tolerance for younger kids, but require at least one strong match
+            if any([len(m) > 2 for m in violence_matches + drug_matches + gambling_matches + self_harm_matches + crime_matches]):
+                 # Basic check, but let's be more specific
+                 if any(len(m) > 2 for m in violence_matches) or \
+                    any(len(m) > 2 for m in drug_matches) or \
+                    any(len(m) > 2 for m in gambling_matches) or \
+                    any(len(m) > 2 for m in self_harm_matches):
+                    is_safe = False
         else:
             # Older kids: Block explicit gambling/self-harm/drugs, allow mild violence context
-            if any([drug_matches, gambling_matches, self_harm_matches, crime_matches]):
+            # Increased threshold to 2 matches to avoid accidental single-word blocks
+            if len(drug_matches) > 1 or len(gambling_matches) > 1 or len(self_harm_matches) > 0:
                 is_safe = False
             # Still block severe violence for older kids
             if len(violence_matches) > 2:
@@ -699,27 +749,59 @@ def analyze_url(url: str, age: int) -> Tuple[bool, float, List[str]]:
             score += 100
     
     # Keyword detection in URL (Using regex)
-    # If it's a trusted domain, we only care about the path, not the domain itself
     target_text = url_lower
-    if is_trusted_domain(url_lower):
-        # Extract path for deeper check, but skip domain keywords like 'sex' in 'sex-education-wiki' maybe?
-        # For now, just be more lenient on trusted sites
-        target_text = url_lower.split('.com')[-1] if '.com' in url_lower else url_lower
+    
+    # Check if this is a search engine URL to extract the query
+    parsed_u = urlparse(url_lower)
+    is_search = is_search_engine(url_lower)
+    
+    query_text = ""
+    # Very basic query extraction for common engines
+    if is_search:
+        if 'q=' in parsed_u.query:
+            query_parts = parsed_u.query.split('q=')[1].split('&')[0]
+            query_text = requests.utils.unquote(query_parts).replace('+', ' ')
+        elif 'p=' in parsed_u.query: # Yahoo uses p=
+            query_parts = parsed_u.query.split('p=')[1].split('&')[0]
+            query_text = requests.utils.unquote(query_parts).replace('+', ' ')
+            
+        # Short query rule: If user is typing 'lo' (for 'lottery' or 'love'), don't block yet.
+        # Wait for meaningful input.
+        if query_text and len(query_text) < 3:
+             # Basic navigation or incomplete typing on SE
+             return True, 0.0, ["Search query too short or ambiguous"]
+             
+        if query_text:
+            target_text = query_text
+    elif is_trusted_domain(url_lower):
+        # Extract path for deeper check
+        target_text = parsed_u.path
         
     url_keywords = EXPLICIT_RE.findall(target_text)
     if url_keywords:
         # Check against meta keywords that might appear innocently
         filtered_keywords = [k for k in url_keywords if k.lower() not in META_KEYWORDS]
         
-        # If we have explicit keywords that aren't meta-tags, block it.
-        # We process 'search engine' queries strictly for explicit terms.
+        should_block = False
         if filtered_keywords:
+             if is_search:
+                 # Search engines need STRICTER evidence. 
+                 # One explicit word might be a health search or news.
+                 # Block only if multiple explicit words OR if the word is long/unambiguous
+                 strong_matches = [k for k in filtered_keywords if len(k) >= 4]
+                 if len(strong_matches) > 0 or len(filtered_keywords) > 1:
+                     should_block = True
+             else:
+                 should_block = True
+                 
+        if should_block:
              reasons.append(f"Explicit keywords in URL: {set(filtered_keywords)}")
              score += 50
     
     # Violence/Crime detection in URL
-    val_keywords = VIOLENCE_RE.findall(url_lower)
-    crime_keywords = CRIME_RE.findall(url_lower)
+    # Use target_text (query or path) instead of full url_lower to avoid matching domain names/params incorrectly
+    val_keywords = VIOLENCE_RE.findall(target_text)
+    crime_keywords = CRIME_RE.findall(target_text)
     
     if (val_keywords or crime_keywords) and not is_trusted_domain(url_lower):
         if val_keywords:
@@ -729,13 +811,14 @@ def analyze_url(url: str, age: int) -> Tuple[bool, float, List[str]]:
         score += 80
 
     # Gambling & Self-Harm in URL
-    if GAMBLING_RE.search(url_lower) and not is_trusted_domain(url_lower):
+    # Use target_text (search query or path) for better accuracy
+    if GAMBLING_RE.findall(target_text) and not is_trusted_domain(url_lower):
          reasons.append("Gambling in URL")
          score += 80
-    if DRUG_RE.search(url_lower) and not is_trusted_domain(url_lower):
+    if DRUG_RE.findall(target_text) and not is_trusted_domain(url_lower):
          reasons.append("Drug content in URL")
          score += 80
-    if SELF_HARM_RE.search(url_lower) and not is_trusted_domain(url_lower):
+    if SELF_HARM_RE.findall(target_text) and not is_trusted_domain(url_lower):
          reasons.append("Self-harm content in URL")
          score += 100
 
