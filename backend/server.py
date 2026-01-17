@@ -244,6 +244,19 @@ class ContentLogResponse(BaseModel):
 class PINUpdate(BaseModel):
     pin: str
 
+class InsightItem(BaseModel):
+    title: str
+    description: str
+    sentiment: str  # 'positive', 'neutral', 'negative'
+
+class WellbeingResponse(BaseModel):
+    period_days: int
+    total_scans: int
+    safety_score: float
+    blocked_count: int
+    top_blocked_categories: List[Dict[str, Any]]
+    insights: List[InsightItem]
+
 # ==================== SECURITY HELPERS ====================
 
 def hash_password(password: str) -> str:
@@ -1004,6 +1017,148 @@ async def search_logs(
         result.append(log)
     
     return result
+
+@api_router.get("/insights/{profile_id}", response_model=WellbeingResponse)
+async def get_wellbeing_insights(
+    profile_id: str,
+    days: int = 7,
+    current_user = Depends(get_current_user)
+):
+    # Verify profile ownership
+    profile = await db.profiles.find_one({
+        "_id": ObjectId(profile_id),
+        "parent_id": str(current_user["_id"])
+    })
+    
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+        
+    # Calculate date range
+    start_date = datetime.utcnow() - timedelta(days=days)
+    
+    # Fetch logs
+    logs = await db.logs.find({
+        "profile_id": profile_id,
+        "detected_at": {"$gte": start_date}
+    }).to_list(1000) # Limit reasonable analysis size
+    
+    total_scans = len(logs)
+    
+    if total_scans == 0:
+        return {
+            "period_days": days,
+            "total_scans": 0,
+            "safety_score": 100.0,
+            "blocked_count": 0,
+            "top_blocked_categories": [],
+            "insights": [
+                {
+                    "title": "No Activity Detected",
+                    "description": "No browsing activity recorded in this period.",
+                    "sentiment": "neutral"
+                }
+            ]
+        }
+        
+    # Aggregation
+    safe_count = sum(1 for log in logs if log["is_safe"])
+    unsafe_count = total_scans - safe_count
+    safety_score = (safe_count / total_scans) * 100.0
+    
+    # Categorize Block Reasons
+    categories = {
+        "Social Media": 0,
+        "Violence & Gore": 0,
+        "Adult Content": 0,
+        "Gambling": 0,
+        "Drugs": 0,
+        "Self-Harm": 0,
+        "Other": 0
+    }
+    
+    for log in logs:
+        if not log["is_safe"]:
+            reasons_text = " ".join(log["reasons"]).lower()
+            
+            matched = False
+            if "social media" in reasons_text:
+                categories["Social Media"] += 1
+                matched = True
+            if any(x in reasons_text for x in ["violence", "gore", "weapon", "kill", "blood"]):
+                categories["Violence & Gore"] += 1
+                matched = True
+            if any(x in reasons_text for x in ["explicit", "porn", "nude", "adult", "nsfw", "sexy"]):
+                categories["Adult Content"] += 1
+                matched = True
+            if "gambling" in reasons_text:
+                categories["Gambling"] += 1
+                matched = True
+            if "drug" in reasons_text:
+                categories["Drugs"] += 1
+                matched = True
+            if any(x in reasons_text for x in ["self-harm", "suicide", "depression"]):
+                categories["Self-Harm"] += 1
+                matched = True
+                
+            if not matched:
+                categories["Other"] += 1
+                
+    # Sort categories
+    sorted_cats = sorted(
+        [{"category": k, "count": v} for k, v in categories.items() if v > 0],
+        key=lambda x: x["count"],
+        reverse=True
+    )
+    
+    # Generate Insights
+    insights = []
+    
+    # Insight 1: General Safety
+    if safety_score >= 90:
+        insights.append({
+            "title": "Healthy Habits",
+            "description": "Browsing activity is largely safe and constructive.",
+            "sentiment": "positive"
+        })
+    elif safety_score >= 70:
+        insights.append({
+            "title": "Moderate Risks",
+            "description": "Some restricted content is being accessed occasionally.",
+            "sentiment": "neutral"
+        })
+    else:
+        insights.append({
+            "title": "High Risk Activity",
+            "description": "Frequent attempts to access blocked content detected.",
+            "sentiment": "negative"
+        })
+        
+    # Insight 2: Top Category
+    if sorted_cats:
+        top_cat = sorted_cats[0]
+        if top_cat["count"] > 2:
+            insights.append({
+                "title": f"Main Concern: {top_cat['category']}",
+                "description": f"Most blocked attempts are related to {top_cat['category']}.",
+                "sentiment": "neutral" if top_cat["category"] == "Social Media" else "negative"
+            })
+            
+    # Insight 3: Safe Streak (if applicable)
+    if unsafe_count == 0 and total_scans > 10:
+        insights.append({
+            "title": "Perfect Week",
+            "description": "No harmful content was accessed in the last 7 days.",
+            "sentiment": "positive"
+        })
+
+    return {
+        "period_days": days,
+        "total_scans": total_scans,
+        "safety_score": round(safety_score, 1),
+        "blocked_count": unsafe_count,
+        "top_blocked_categories": sorted_cats[:3],
+        "insights": insights
+    }
 
 # ==================== MAIN APP SETUP ====================
 

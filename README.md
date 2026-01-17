@@ -26,6 +26,7 @@ SafeBrowse is a next-generation parental control application designed to provide
 - **Activity Monitoring**: View detailed logs of blocked content, complete with reasoning (e.g., "AI detected violence with 95% confidence").
 - **Secure Access**: PIN-protected parent mode ensures children cannot tamper with settings.
 - **Searchable Logs**: Easily filter and search through activity history.
+- **Wellbeing Insights**: Get weekly digests of browsing habits, safety scores, and top blocked categories without needing to read every log.
 
 ### 📱 Integrated Child Browser
 - **Safe Webview**: A custom built-in browser that filters content before it renders.
@@ -173,6 +174,7 @@ Safe-Browse/
 ### Analysis & Logs
 - `POST /api/content/analyze`: Submit text/image/url for safety check.
 - `GET /api/logs`: Retrieve activity history for profiles.
+- `GET /api/insights/{profile_id}`: Retrieve aggregated wellbeing stats and insights.
 
 ---
 
