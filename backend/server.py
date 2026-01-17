@@ -1199,8 +1199,13 @@ async def get_digital_wellbeing(
     
     # Initialize daily stats structure
     daily_map = {}
+    
+    # We want the last 'days' days INCLUDING today.
+    # If days=7, we want [Today-6, Today-5, ..., Today].
+    today_date = datetime.utcnow().date()
+    
     for i in range(days):
-        d = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+        d = (today_date - timedelta(days=days - 1 - i)).strftime('%Y-%m-%d')
         daily_map[d] = {"screen_time": 0, "unsafe": 0}
         
     last_time = None

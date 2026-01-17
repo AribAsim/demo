@@ -41,7 +41,9 @@ export default function Dashboard() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [recentLogs, setRecentLogs] = useState<Log[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
   const [loading, setLoading] = useState(true);
+  const [selectedStatsProfile, setSelectedStatsProfile] = useState<string | null>(null);
 
   useEffect(() => {
     loadData();
@@ -59,6 +61,9 @@ export default function Dashboard() {
       ]);
 
       setProfiles(profilesRes.data);
+      if (profilesRes.data.length > 0 && !selectedStatsProfile) {
+        setSelectedStatsProfile(profilesRes.data[0].id);
+      }
       setRecentLogs(logsRes.data);
     } catch (error: any) {
       console.error('Error loading data:', error);
@@ -173,10 +178,29 @@ export default function Dashboard() {
           )}
         </View>
 
-
-        {profiles.length > 0 && (
+        {profiles.length > 0 && selectedStatsProfile && (
           <View style={styles.section}>
-            <WellbeingSection profileId={profiles[0].id} />
+            <Text style={styles.sectionTitle}>Digital Wellbeing</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabContainer}>
+              {profiles.map(profile => (
+                <TouchableOpacity
+                  key={profile.id}
+                  style={[
+                    styles.tab,
+                    selectedStatsProfile === profile.id && styles.activeTab
+                  ]}
+                  onPress={() => setSelectedStatsProfile(profile.id)}
+                >
+                  <Text style={[
+                    styles.tabText,
+                    selectedStatsProfile === profile.id && styles.activeTabText
+                  ]}>
+                    {profile.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <WellbeingSection profileId={selectedStatsProfile} />
           </View>
         )}
 
@@ -418,4 +442,25 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginTop: 4,
   },
+  tabContainer: {
+    flexDirection: 'row',
+    marginBottom: 16,
+  },
+  tab: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#334155',
+    marginRight: 8,
+  },
+  activeTab: {
+    backgroundColor: '#6366f1',
+  },
+  tabText: {
+    color: '#94a3b8',
+    fontWeight: '600',
+  },
+  activeTabText: {
+    color: '#ffffff',
+  }
 });

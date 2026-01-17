@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, Dimensions, ActivityIndicator } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { LineChart, BarChart } from 'react-native-chart-kit';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
@@ -27,11 +28,7 @@ export default function WellbeingSection({ profileId }: { profileId: string }) {
     const [data, setData] = useState<WellbeingData | null>(null);
     const [loading, setLoading] = useState(true);
 
-    useEffect(() => {
-        fetchWellbeingData();
-    }, [profileId]);
-
-    const fetchWellbeingData = async () => {
+    const fetchWellbeingData = useCallback(async () => {
         try {
             const response = await axios.get(
                 `${API_URL}/api/parent/digital-wellbeing/${profileId}`,
@@ -43,7 +40,19 @@ export default function WellbeingSection({ profileId }: { profileId: string }) {
         } finally {
             setLoading(false);
         }
-    };
+    }, [profileId, token]);
+
+    useFocusEffect(
+        useCallback(() => {
+            fetchWellbeingData();
+
+            const interval = setInterval(() => {
+                fetchWellbeingData();
+            }, 30000); // Poll every 30 seconds
+
+            return () => clearInterval(interval);
+        }, [fetchWellbeingData])
+    );
 
     if (loading) {
         return (
