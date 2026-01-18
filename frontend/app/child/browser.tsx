@@ -63,8 +63,6 @@ export default function SafeBrowseBrowser() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [maturityLevel, setMaturityLevel] = useState('strict');
-
-  // Stats
   const [blockedCount, setBlockedCount] = useState(3);
   const [screenTime, setScreenTime] = useState(45);
   const [safetyScore, setSafetyScore] = useState(95);
@@ -142,15 +140,15 @@ export default function SafeBrowseBrowser() {
   // Handle Hardware Back Button
   useEffect(() => {
     const backAction = () => {
-      // 1. If WebView can go back, go back
+      // Navigate back in WebView if possible
       if (canGoBack && webViewRef.current) {
         webViewRef.current.goBack();
-        return true; // Block default behavior
+        return true;
       }
 
-      // 2. If blocked or on home, ask for PIN to exit
+      // Otherwise ask for PIN to exit
       handleExitChildMode();
-      return true; // Block default behavior (prevent exiting app)
+      return true;
     };
 
     const backHandler = BackHandler.addEventListener(
@@ -275,17 +273,14 @@ export default function SafeBrowseBrowser() {
         );
 
         if (response.data.blocked) {
-          // If image blocked:
-          // - Strict Mode: Block ONLY if it's an image violation (Full Page Block)
-          // - Moderate/Lenient Mode: Block ONLY the image (Blur)
-
+          // Image violation logic
           if (data.type === 'image' && (maturityLevel === 'moderate' || maturityLevel === 'lenient')) {
-            // Specific Image Blocking for older kids
+            // Blurred blocking for moderate/lenient
             const script = `if(window.safeBrowseBlockImage) window.safeBrowseBlockImage('${data.id}'); true;`;
             webViewRef.current?.injectJavaScript(script);
             setBlockedCount(prev => prev + 1);
           } else {
-            // Strict mode OR Text violation = Block Whole Page
+            // Full page block for strict mode or text violations
             webViewRef.current?.stopLoading();
             setBlocked(true);
             setBlockReason(response.data.reasons.join(', '));

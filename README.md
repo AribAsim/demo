@@ -45,6 +45,21 @@ SafeBrowse is a next-generation parental control application designed to provide
 - **Visual Feedback**: Clear "Page Blocked" screens when harmful content is detected, educating the child on why it was blocked.
 - **Seamless Experience**: Fast browsing with minimal latency thanks to optimized local inference.
 
+### 🌟 Bonus Features
+- **Parental Monitoring**: Dashboard allows parents to view a complete list of websites and links visited by their child through a centralized dashboard.
+- **Age-Based Social Media Access Control**: Automatic restriction for students below 16 from accessing social media platforms like Facebook, Instagram, and TikTok.
+- **Explicit Content Detection**: Comprehensive scanning of uploaded/downloaded media files (Images, Text) to detect explicit or inappropriate content (Audio/Video partial support).
+- **Wellbeing & Usage Insights**: Analyzes browsing patterns to suggest healthy screen-time habits and provides actionable wellbeing recommendations.
+- **Ethical Content Filtering**: Advanced filtering blocks websites disguised as educational but containing unethical text or harmful ideologies.
+- **Tooling & Security Layer**: Logs all activity, detects suspicious links, and prevents unsafe navigation through robust backend logging.
+
+### Implementations of Bonus Features
+Parental Monitoring-Dashboard visible in frontend-✅ Implemented
+Social Media Control-Blocks < 16y/o from social sites-✅ Implemented
+Explicit Content-Images/Text/Video titles valid. No Audio support-⚠️ Partial
+Wellbeing Insights-Insights and graph data available-✅ Implemented
+Ethical Filtering-Hate speech detection active-✅ Implemented
+Security Layer-Logs active. No advanced phishing/redirect detection-⚠️ Partial
 ---
 ## Process Flow Diagram
 User initiates a web request

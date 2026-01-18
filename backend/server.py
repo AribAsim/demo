@@ -93,11 +93,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SafeBrowse AI API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
-# ==================== IMPROVED AI MODEL INITIALIZATION ====================
-
+# AI Model Initialization
 logger = logging.getLogger("SafeBrowseAI")
 
-# Multi-Model Approach for Better Accuracy
+# NSFW Detection Models
 class NSFWDetector:
     def __init__(self):
         self.image_models = []
@@ -142,7 +141,7 @@ class NSFWDetector:
         # Load Text Models
         try:
             logger.info("Loading Text AI Models...")
-            # Primary Model: Toxic Comment (The one we know works well on limited RAM)
+            # Primary Model: Toxic Comment
             self.text_models.append({
                 'name': 'toxic-comment',
                 'model': pipeline(
@@ -270,7 +269,7 @@ class DigitalWellbeingResponse(BaseModel):
     daily_stats: List[DailyStat]
     unsafe_detections_total: int
 
-# ==================== SECURITY HELPERS ====================
+# Security Helpers
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -303,9 +302,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-# ==================== IMPROVED CONTENT FILTERING ====================
+# Content Filtering
 
-# Enhanced keyword lists with regex patterns
+# Keyword lists with regex patterns
 EXPLICIT_KEYWORDS = [
     r'\bporn', r'\bxxx\b', r'\bsex\b', r'\bnude\b', r'\bnaked\b', 
     r'\bnsfw\b', r'\bhentai\b', r'\berotic\b', 
@@ -313,7 +312,7 @@ EXPLICIT_KEYWORDS = [
     r'\bpussy\b', r'\bcock\b', r'\bcum', 
     r'\bmasturbat', r'\borgy\b', r'\brape\b',
     r'adult content', r'adult site', r'adult movie', r'adult video',
-    # Contextual Explicit Phrases (to avoid blocking single words like 'hot')
+    # Contextual Explicit Phrases
     'hot girl', 'hot girls', 'hot babe', 'hot babes', 'hot sex', 'hot women', 
     'hot milf', 'hot teen', 'hot teens', 'hot wife', 'hot wives', 'hot mom', 'hot moms',
     'strip club', 'strip tease', 'hard core', 'hardcore',
@@ -495,8 +494,8 @@ def analyze_video_metadata(url: str, title: str, description: str, age: int) -> 
 
 def analyze_text_content(text: str, age: int, url_context: Optional[str] = None) -> Tuple[bool, float, List[str]]:
     """
-    Multi-model text analysis with ensemble voting and context awareness (Layer 2)
-    Updated to include Ethical/Hate Speech filtering (Layer 2.5)
+    Multi-model text analysis with ensemble voting and context awareness.
+    Also handles Ethical/Hate Speech filtering.
     """
     if not text or not text.strip():
         return True, 0.0, []
@@ -1189,7 +1188,6 @@ async def analyze_content(request: ContentAnalysisRequest):
                 None, analyze_url, request.content, age, profile.get("blocked_sites", []), profile.get("whitelisted_sites", [])
             )
         elif request.content_type == "video_metadata":
-             # New support based on plan B1
              video_url = ""
              description = ""
              title = request.content
@@ -1236,7 +1234,7 @@ async def analyze_content(request: ContentAnalysisRequest):
         # Fail SAFE (Allow) so browser doesn't break.
         return ContentAnalysisResponse(is_safe=True, confidence=0.0, reasons=["Scanner Error"], blocked=False)
 
-# ==================== LOGS ROUTES ====================
+# Logs Routes
 
 @api_router.get("/logs", response_model=List[ContentLogResponse])
 async def get_logs(
